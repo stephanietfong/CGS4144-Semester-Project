@@ -232,6 +232,7 @@ norm_matrix <- assay(dds_norm)
 df_by_var <- data.frame(norm_matrix) %>%
   filter(rownames(norm_matrix) %in% rownames(top_50_genes))
 
+# Define the annotation for the heatmap
 annotation_df <- metadata %>%
   dplyr::select(
     refinebio_accession_code,
@@ -273,9 +274,9 @@ go_results <- gost(
   evcodes = TRUE
 )
 
+# Sort the results by p-value
 sorted_by_enrichment <- as.data.frame(go_results$result) %>%
   arrange(p_value)
-
 print(sorted_by_enrichment)
 
 
