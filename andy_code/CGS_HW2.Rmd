@@ -1,0 +1,559 @@
+---
+title: "CGS_HW2"
+author: "Andy Millian"
+date: "2024-09-25"
+output: pdf_document
+---
+```{r}
+library(AnnotationDbi)
+library(ggplot2)
+```
+
+```{r}
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+plots_dir <- "plots"
+if (!dir.exists(plots_dir)) {
+  dir.create(plots_dir)
+}
+results_dir <- "results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+```
+
+```{r}
+data_dir <- file.path("data", "SRP092402")
+data_file <- file.path(data_dir, "SRP092402.tsv")
+metadata_file <- file.path(data_dir, "metadata_SRP092402.tsv")
+```
+
+```{r}
+file.exists(data_file)
+file.exists(metadata_file)
+```
+
+```{r}
+if (!("org.Dr.eg.db" %in% installed.packages())) {
+  BiocManager::install("org.Dr.eg.db", update = FALSE)
+}
+```
+
+```{r}
+library(org.Dr.eg.db)
+library(magrittr)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+```
+
+```{r}
+metadata <- readr::read_tsv(metadata_file)
+```
+```{r}
+expression_df <- readr::read_tsv(data_file) %>%
+  tibble::column_to_rownames("Gene")
+```
+
+```{r}
+expression_df <- expression_df %>%
+  dplyr::select(metadata$refinebio_accession_code)
+all.equal(colnames(expression_df), metadata$refinebio_accession_code)
+```
+
+```{r}
+expression_df <- expression_df %>%
+  tibble::rownames_to_column("Gene")
+```
+
+```{r}
+keytypes(org.Hs.eg.db)
+
+```
+```{r}
+valid_keys <- keys(org.Hs.eg.db, keytype = "ENSEMBL")
+head(valid_keys)
+
+```
+
+
+
+```{r}
+mapped_list_hugo <- mapIds(
+  org.Hs.eg.db,
+  keys = expression_df$Gene,
+  keytype = "ENSEMBL", 
+  column = "SYMBOL",
+  multiVals = "list"
+)
+
+```
+
+```{r}
+head(mapped_list_hugo)
+```
+```{r}
+mapped_df_hugo <- mapped_list_hugo %>%
+  tibble::enframe(name = "Ensembl", value = "HUGO") %>%
+  tidyr::unnest(cols = HUGO)
+```
+
+
+
+```{r}
+head(mapped_df_hugo)
+```
+
+```{r}
+summary(as.factor(mapped_df_hugo$HUGO), maxsum = 10)
+```
+
+```{r}
+multi_mapped <- mapped_df %>%
+  dplyr::count(Ensembl, name = "SYMBOL_id_count") %>%
+  dplyr::arrange(desc(SYMBOL_id_count))
+head(multi_mapped)
+```
+
+```{r}
+collapsed_mapped_df <- mapped_df %>%
+  dplyr::group_by(SYMBOL) %>%
+  dplyr::summarize(all_SYMBOL_ids = paste(SYMBOL, collapse = ";"))
+```
+
+```{r}
+collapsed_mapped_df %>%
+  dplyr::filter(stringr::str_detect(all_SYMBOL_ids, ";")) %>%
+  head()
+```
+
+```{r}
+final_mapped_df_hugo <- data.frame(
+  "HUGO_Symbol" = mapIds(
+    org.Hs.eg.db, 
+    keys = expression_df$Gene,
+    keytype = "ENSEMBL", 
+    column = "SYMBOL", 
+    multiVals = "first" 
+  )
+) %>%
+  tibble::rownames_to_column("Ensembl") %>%
+  dplyr::inner_join(expression_df, by = c("Ensembl" = "Gene"))
+```
+
+```{r}
+head(final_mapped_df_hugo)
+
+```
+
+```{r}
+readr::write_tsv(final_mapped_df_hugo, file.path(
+  results_dir,
+  "SRP092402_HUGO_Symbols.tsv" 
+))
+```
+
+
+## STEP 2
+
+```{r}
+log_transformed_df <- log2(expression_df[,-1] + 1)
+pca <- prcomp(t(log_transformed_df), scale. = TRUE)
+pca_df <- data.frame(
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  Sample = colnames(log_transformed_df)
+)
+
+
+pca_df <- dplyr::left_join(pca_df, metadata, by = c("Sample" = "refinebio_accession_code"))
+pca_df_filtered <- pca_df %>%
+  dplyr::filter(refinebio_disease != "na")
+ggplot(pca_df_filtered, aes(x = PC1, y = PC2, color = refinebio_disease)) +
+  geom_point(size = 3) + 
+  scale_color_manual(values = c(
+    "tb subjects" = "red",
+    "healthy controls" = "blue",
+    "lung dx controls" = "green",
+    "mtp controls" = "purple"
+  )) +  
+  ggtitle("PCA Plot: Tuberculosis vs. Controls") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+ggsave(file.path(plots_dir, "PCA_plot_grouped_updated.png"))
+
+
+```
+```{r}
+head(metadata)
+```
+
+```{r}
+library(Rtsne)
+filtered_metadata <- metadata %>%
+  dplyr::filter(refinebio_disease != "na")
+head(filtered_metadata)
+expression_data_tsne <- expression_df %>%
+  dplyr::select(filtered_metadata$refinebio_accession_code)
+log_expression_data_tsne <- log2(expression_data_tsne + 1)
+set.seed(42)  
+tsne_results <- Rtsne(t(log_expression_data_tsne), dims = 2, perplexity = 30)
+tsne_df <- data.frame(
+  tSNE1 = tsne_results$Y[, 1],
+  tSNE2 = tsne_results$Y[, 2],
+  Sample = colnames(log_expression_data_tsne)
+)
+head(tsne_df)
+tsne_df <- dplyr::left_join(tsne_df, filtered_metadata, by = c("Sample" = "refinebio_accession_code"))
+head(tsne_df)
+ggplot(tsne_df, aes(x = tSNE1, y = tSNE2, color = refinebio_disease)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c(
+    "tb subjects" = "red",
+    "healthy controls" = "blue",
+    "lung dx controls" = "green",
+    "mtp controls" = "purple"
+  )) +
+  ggtitle("t-SNE Plot: Tuberculosis vs. Controls") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+ggsave(file.path(plots_dir, "tSNE_plot_grouped.png"))
+
+
+```
+
+```{r}
+library(umap)
+umap_results <- umap(t(log_expression_data_tsne))
+umap_df <- data.frame(
+  UMAP1 = umap_results$layout[, 1],
+  UMAP2 = umap_results$layout[, 2],
+  Sample = colnames(log_expression_data_tsne)
+)
+umap_df <- dplyr::left_join(umap_df, filtered_metadata, by = c("Sample" = "refinebio_accession_code"))
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2, color = refinebio_disease)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = c(
+    "tb subjects" = "red",
+    "healthy controls" = "blue",
+    "lung dx controls" = "green",
+    "mtp controls" = "purple"
+  )) +
+  ggtitle("UMAP Plot: Tuberculosis vs. Controls") +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+ggsave(file.path(plots_dir, "UMAP_plot_grouped.png"))
+
+```
+
+## Step 3
+
+```{r}
+if (!("DESeq2" %in% installed.packages())) {
+  BiocManager::install("DESeq2", update = FALSE)
+}
+if (!("EnhancedVolcano" %in% installed.packages())) {
+  BiocManager::install("EnhancedVolcano", update = FALSE)
+}
+if (!("apeglm" %in% installed.packages())) {
+  BiocManager::install("apeglm", update = FALSE)
+}
+library(DESeq2)
+library(ggplot2)
+library(magrittr)
+```
+
+```{r}
+set.seed(12345)
+```
+
+```{r}
+metadata <- readr::read_tsv(metadata_file)
+```
+```{r}
+expression_df <- readr::read_tsv(data_file) %>%
+  tibble::column_to_rownames("Gene")
+```
+
+```{r}
+expression_df <- expression_df %>%
+  dplyr::select(metadata$refinebio_accession_code)
+all.equal(colnames(expression_df), metadata$refinebio_accession_code)
+```
+```{r}
+head(metadata$refinebio_title)
+
+```
+```{R}
+metadata <- metadata %>%
+  dplyr::mutate(refinebio_disease = dplyr::case_when(
+    stringr::str_detect(refinebio_title, "R98S") ~ "R98S",
+    stringr::str_detect(refinebio_title, "WT") ~ "reference"
+  ))
+```
+
+```{r}
+dplyr::select(metadata, refinebio_title, refinebio_disease)
+```
+
+```{r}
+str(metadata$refinebio_disease)
+```
+
+```{r}
+metadata <- metadata %>%
+  dplyr::mutate(
+    refinebio_disease = factor(refinebio_disease, levels = c("reference", "R98S"))
+  )
+```
+
+```{R}
+levels(metadata$refinebio_disease)
+```
+
+```{r}
+filtered_expression_df <- expression_df %>%
+  dplyr::filter(rowSums(.) >= 10)
+```
+
+```{r}
+gene_matrix <- round(filtered_expression_df)
+```
+
+```{r}
+sum(is.na(metadata$refinebio_disease))
+metadata[is.na(metadata$refinebio_disease), ]
+```
+
+```{r}
+ddset <- DESeqDataSetFromMatrix(
+  countData = gene_matrix,
+  colData = metadata,
+  design = ~refinebio_disease_stage
+)
+```
+
+```{r}
+deseq_object <- DESeq(ddset)
+```
+
+```{r}
+deseq_results <- results(deseq_object)
+```
+
+```{r}
+resultsNames(deseq_object)
+```
+
+
+```{r}
+deseq_results <- lfcShrink(
+  deseq_object,
+  coef = 5,
+  res = deseq_results 
+)
+```
+
+```{r}
+head(deseq_results)
+```
+
+```{r}
+deseq_df <- deseq_results %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Gene") %>%
+  dplyr::mutate(threshold = padj < 0.05) %>%
+  dplyr::arrange(dplyr::desc(log2FoldChange))
+```
+
+```{r}
+readr::write_tsv(
+  deseq_df,
+  file.path(
+    results_dir,
+    "SRP092402_diff_expr_results.tsv" # Replace with a relevant output file name
+  )
+)
+```
+
+```{r}
+volcano_plot <- EnhancedVolcano::EnhancedVolcano(
+  deseq_df,
+  lab = deseq_df$Gene,
+  x = "log2FoldChange",
+  y = "padj",
+  pCutoff = 0.01
+)
+```
+
+```{r}
+volcano_plot
+ggsave(
+  plot = volcano_plot,
+  file.path(plots_dir, "SRP092402_volcano_plot.png")
+)
+```
+
+```{r}
+library(DESeq2)
+metadata$refinebio_disease <- factor(metadata$refinebio_disease)
+ddset <- DESeqDataSetFromMatrix(
+  countData = gene_matrix,
+  colData = metadata,
+  design = ~refinebio_disease_stage  
+)
+deseq_object <- DESeq(ddset)
+```
+
+
+```{r}
+sorted_results <- deseq_df[order(deseq_df$padj, na.last = NA), ]
+top50_genes <- head(sorted_results, 50)
+full_results_df <- as.data.frame(sorted_results)
+top50_genes_df <- as.data.frame(top50_genes)
+write.csv(full_results_df, file.path(results_dir, "differential_expression_results.csv"), row.names = TRUE)
+head(top50_genes_df)
+```
+
+## Step 4
+```{r}
+significant_genes <- deseq_results[which(deseq_results$padj < 0.05), ]
+significant_genes_df <- as.data.frame(significant_genes)
+head(significant_genes_df)
+sig_gene_names <- rownames(significant_genes_df)
+
+```
+
+```{r}
+sig_gene_matrix <- gene_matrix_clean[rownames(gene_matrix_clean) %in% sig_gene_names, ]
+log_sig_gene_matrix <- log2(sig_gene_matrix + 1)
+```
+
+```{r}
+sum(deseq_results$padj < 0.05, na.rm = TRUE)
+significant_genes <- deseq_results[which(deseq_results$padj < 0.05), ]
+significant_genes_df <- as.data.frame(significant_genes)
+head(significant_genes_df)
+
+```
+
+```{r}
+# Extract the gene names of significantly differentially expressed genes
+sig_gene_names <- rownames(significant_genes_df)
+sig_gene_matrix <- gene_matrix[rownames(gene_matrix) %in% sig_gene_names, ]
+log_sig_gene_matrix <- log2(sig_gene_matrix + 1)
+head(rownames(gene_matrix))
+
+```
+
+```{r}
+if (!("ComplexHeatmap" %in% installed.packages())) {
+  BiocManager::install("ComplexHeatmap")
+}
+library(ComplexHeatmap)
+```
+
+```{r}
+# Create a factor for sample grouping for tb subjects" vs "healthy controls
+sample_grouping <- metadata$refinebio_disease_stage[match(colnames(log_sig_gene_matrix), metadata$refinebio_accession_code)]
+ha <- HeatmapAnnotation(
+  Group = sample_grouping,
+  col = list(Group = c("tb subjects" = "red", "healthy controls" = "blue","lung dx controls" = 'green' ,'mtp controls' = 'purple', 'na' = 'black'))
+)
+heatmap <- Heatmap(
+  log_sig_gene_matrix, 
+  name = "Expression", 
+  top_annotation = ha, 
+  show_row_names = FALSE, 
+  show_column_names = FALSE,
+  cluster_rows = TRUE, 
+  cluster_columns = TRUE
+)
+draw(heatmap)
+```
+
+```{r}
+pdf(file.path(plots_dir, "SRP092402_sig_genes_heatmap.pdf"))
+draw(heatmap)
+dev.off()
+png(file.path(plots_dir, "SRP092402_sig_genes_heatmap.png"))
+draw(heatmap)
+dev.off()
+```
+
+```{r}
+if (!("topGO" %in% installed.packages())) {
+  BiocManager::install("topGO")
+}
+if (!("org.Hs.eg.db" %in% installed.packages())) {
+  BiocManager::install("org.Hs.eg.db")
+}
+library(topGO)
+library(org.Hs.eg.db)
+```
+```{r}
+# Set a p-value threshold to only show significant data
+pvalue_threshold <- 0.05
+sig_genes <- rownames(deseq_results)[deseq_results$pvalue < pvalue_threshold]
+all_genes <- rownames(deseq_results)
+gene_list <- factor(as.integer(all_genes %in% sig_genes))
+names(gene_list) <- all_genes
+
+```
+
+```{r}
+# Define the topGO data
+go_data <- new(
+  "topGOdata",
+  ontology = "BP",
+  allGenes = gene_list,
+  geneSelectionFun = function(x) x == 1,  
+  annot = annFUN.org,
+  mapping = "org.Hs.eg.db",
+  ID = "ENSEMBL"  
+)
+```
+
+```{r}
+# Perform the enrichment analysis with Fisher’s exact test
+result_fisher <- runTest(go_data, algorithm = "classic", statistic = "fisher")
+
+# Generate the table of enriched GO terms and include their Fisher p-values
+go_results <- GenTable(
+  go_data,
+  classicFisher = result_fisher,
+  orderBy = "classicFisher",
+  topNodes = 10  # Adjust the number of top terms to display
+)
+
+# Add a column for the p-values (significance levels)
+go_results$pvalue <- as.numeric(go_results$classicFisher)
+go_results$pvalue <- as.numeric(sub("<", "", go_results$classicFisher))
+
+```
+```{r}
+# Optionally format p-values to display a maximum of 10 decimal places
+go_results$pvalue <- format(go_results$pvalue, scientific = TRUE, digits = 10)
+
+# View the formatted results
+print(go_results)
+```
+
+```{r}
+# Save the results to a CSV file
+write.csv(go_results, file = file.path(results_dir, "topGO_disease_ontology_results.csv"), row.names = FALSE)
+
+# View the top results
+head(go_results)
+
+```
+
+
+
+
+
+
+
+
+
+
