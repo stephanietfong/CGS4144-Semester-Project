@@ -1,0 +1,283 @@
+---
+title: "Analysis"
+output: html_document
+date: "2024-09-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Create the data folder if it doesn't exist
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+# Define file path to the plots dir and create
+plots_dir <- "plots"
+if (!dir.exists(plots_dir)) {
+  dir.create(plots_dir)
+}
+# Define = file path to the results dir and create
+results_dir <- "results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Define the file path to the data directory
+data_dir <- file.path("data", "SRP092402")
+# Declare the file path to the gene matrix file
+data_file <- file.path(data_dir, "SRP092402.tsv")
+# Declare the file path to the metadata file
+metadata_file <- file.path(data_dir, "metadata_SRP092402.tsv")
+# Check if files exist
+file.exists(data_file)
+file.exists(metadata_file)
+
+# Install libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("org.Hs.eg.db")
+library(org.Hs.eg.db)
+install.packages("readr")
+library(readr)
+install.packages("dplyr")
+library(dplyr)
+BiocManager::install("biomaRt")
+library(biomaRt)
+BiocManager::install("AnnotationDbi")
+library(AnnotationDbi)
+install.packages("ggplot2")
+library(ggplot2)
+BiocManager::install("DESeq2")
+library(DESeq2)
+BiocManager::install("M3C")
+library(M3C)
+BiocManager::install("umap")
+library(umap)
+BiocManager::install("EnhancedVolcano")
+library(EnhancedVolcano)
+BiocManager::install("apeglm")
+library(apeglm)
+install.packages("pheatmap", update = FALSE)
+library(pheatmap)
+install.packages("gprofiler2")
+library(gprofiler2)
+library(magrittr)
+
+
+# Read data in files
+metadata <- readr::read_tsv(metadata_file)
+gene_matrix <- readr::read_tsv(data_file)
+gene_matrix <- gene_matrix %>%
+  tibble::column_to_rownames("Gene")
+  
+# Exclude lung dx controls, mtp controls, and n/a samples
+excludedConditions <- c("lung dx controls", "mtp controls", "na")
+metadata <- metadata[!metadata$refinebio_disease %in% excludedConditions, ]
+samples <- metadata$refinebio_accession_code
+gene_matrix <- gene_matrix[, colnames(gene_matrix) %in% samples]
+
+# Check if this is in the same order
+gene_matrix <- gene_matrix %>%
+  dplyr::select(metadata$refinebio_accession_code)
+all.equal(colnames(gene_matrix), metadata$refinebio_accession_code)
+  
+  
+# Step 1
+# Map Ensembl identifiers to Hugo gene identifiers 
+gene_matrix <- gene_matrix %>%
+  tibble::rownames_to_column("Gene")
+mapped_list <- mapIds(
+  org.Hs.eg.db,           
+  keys = gene_matrix$Gene,
+  keytype = "ENSEMBL",      
+  column = "SYMBOL",           
+  multiVals = "first"
+)
+gene_matrix$Gene = mapped_list[gene_matrix$Gene]
+
+# Remove duplicate hugo identifiers
+gene_matrix <- as.data.frame(gene_matrix[!duplicated(gene_matrix$Gene), ])
+if (any(is.na(gene_matrix[, 1]))) {
+  gene_matrix <- as.data.frame(gene_matrix[!is.na(gene_matrix[, 1]), ])
+}
+
+# Save gene_matrix to CSV file as results
+rownames(gene_matrix) <- NULL
+gene_matrix <- gene_matrix %>%
+  tibble::column_to_rownames("Gene")
+write.csv(gene_matrix, file = "GeneMatrix.csv", row.names = TRUE)
+
+# Get the size of the matrix
+dim(gene_matrix)  
+num_genes <- nrow(gene_matrix)
+print(paste("Number of genes:", num_genes))
+
+# Log scale the matrix
+log_numeric_matrix <- log(gene_matrix[, sapply(gene_matrix, is.numeric)] + 1)
+
+# Calculate per-gene median
+gene_medians <- data.frame(
+  Median = apply(log_numeric_matrix, 1, median)
+)
+
+# Create density plot of gene_medians table
+density_plot <- ggplot(
+    gene_medians, aes(x = Median)
+  ) +
+  geom_density(fill = "pink", alpha = 0.5) +
+  labs(title = "Density Plot of Per-Gene Median",
+       x = "Median",
+       y = "Density") +
+  theme_minimal()
+ggsave("DensityPlot.png", plot = density_plot, width = 8, height = 6, dpi = 300)
+  
+
+# Step 2: Plots
+# PCA Plot
+dds <- DESeqDataSetFromMatrix(
+  countData = round(gene_matrix),
+  colData = metadata,
+  design = ~ refinebio_disease
+)
+vsd <- vst(dds)
+pca_plot <- plotPCA(vsd, intgroup = "refinebio_disease") +
+  labs(title = "PCA of Gene Expression Data") +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(-30, 30, by = 2)) +
+  scale_y_continuous(breaks = seq(-30, 30, by = 2)) 
+ggsave("PCAPlot.png", plot = pca_plot, width = 10, height = 8, dpi = 400)
+
+# t-SNE plot
+source("tSNE.R")
+tsne_plot <- tsne(gene_matrix,labels=as.factor(metadata$refinebio_disease)) +
+  scale_x_continuous(breaks = seq(-30, 30, by = 5)) +
+  scale_y_continuous(breaks = seq(-40, 40, by = 5))
+ggsave("t-SNEPlot.png", plot = tsne_plot, width = 10, height = 8, dpi = 400)
+
+# UMAP Plot
+gene_umap <- umap(t(gene_matrix))
+
+umap_data <- as.data.frame(gene_umap$layout)
+colnames(umap_data) <- c("UMAP1", "UMAP2")
+umap_data$condition <- as.factor(metadata$refinebio_disease)
+
+umap_plot <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = condition)) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = seq(-4, 4, by = .5)) +
+  scale_y_continuous(breaks = seq(-5, 15, by = 1)) +
+  labs(title = "UMAP Plot of Gene Expression Data") +
+  theme_minimal()
+ggsave("UMAPPlot.png", plot = umap_plot, width = 10, height = 8, dpi = 400)
+
+
+# Step 3: DE Analysis
+# Make refinebio_disease a factor and set levels
+metadata <- metadata %>%
+  mutate(refinebio_disease = factor(refinebio_disease, levels = c("healthy controls", "tb subjects")))
+levels(metadata$refinebio_disease)
+
+# Create DESeqDataSet from expression dataset and run DE
+dds <- DESeqDataSetFromMatrix(
+  countData = round(gene_matrix),
+  colData = metadata,
+  design = ~ refinebio_disease
+)
+dds <- DESeq(dds)
+deseq_results <- results(dds)
+
+# Get DE results and create data frame
+deseq_results <- lfcShrink(
+  dds,
+  coef = 2, 
+  res = deseq_results
+)
+
+deseq_df <- deseq_results %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Gene") %>%
+  mutate(threshold = padj < 0.05) %>%
+  arrange(desc(log2FoldChange))
+
+# Create volcano plot and save it
+volcano_plot <- EnhancedVolcano(
+  deseq_df,
+  lab = deseq_df$Gene,
+  x = "log2FoldChange",
+  y = "padj",
+  pCutoff = 0.01 
+)
+ggsave("VolcanoPlot.png", plot = volcano_plot, width = 10, height = 8, dpi = 400)
+
+# Get the top 50 most differentially expressed genes and write it to a CSV file
+sorted_results <- deseq_df[order(deseq_df$padj), ]
+top_50_genes <- as.data.frame(head(sorted_results, 50))
+rownames(top_50_genes) <- NULL
+top_50_genes <- top_50_genes %>%
+  tibble::column_to_rownames("Gene")
+write.csv(top_50_genes, file = "Top50Genes.csv", row.names = TRUE)
+
+
+# Step 4: Heatmap
+# Create DESeqDataSet from expression dataset and normalize the data
+dds <- DESeqDataSetFromMatrix(
+  countData = round(gene_matrix),
+  colData = metadata,
+  design = ~1
+)
+dds_norm <- vst(dds)
+
+# Extract matrix data and filter out to only include top 50 genes
+norm_matrix <- assay(dds_norm)
+df_by_var <- data.frame(norm_matrix) %>%
+  filter(rownames(norm_matrix) %in% rownames(top_50_genes))
+
+annotation_df <- metadata %>%
+  dplyr::select(
+    refinebio_accession_code,
+    refinebio_disease
+  ) %>%
+  tibble::column_to_rownames("refinebio_accession_code")
+
+# Create and save heat map
+heatmap <-
+  pheatmap(
+    df_by_var,
+    cluster_rows = TRUE,
+    cluster_cols = TRUE,
+    show_rownames = FALSE,
+    annotation_col = annotation_df,
+    main = "Annotated Heatmap",
+    colorRampPalette(c(
+      "deepskyblue",
+      "black",
+      "red"
+    ))(25
+    ),
+    scale = "row" 
+)
+ggsave("Heatmap.PNG", plot = heatmap, width = 20, height = 10, dpi = 600)
+
+
+# Step 5: Gene Set Enrichment Analysis
+# gProfiler2 / Gene ontology
+go_results <- gost(
+  rownames(top_50_genes), 
+  organism = "hsapiens", 
+  sources = c("GO"),   
+  ordered_query = TRUE,    
+  significant = TRUE,
+  exclude_iea = TRUE,
+  user_threshold = 0.05,
+  domain_scope = "annotated",
+  evcodes = TRUE
+)
+
+sorted_by_enrichment <- as.data.frame(go_results$result) %>%
+  arrange(p_value)
+
+print(sorted_by_enrichment)
+
+
+
+
