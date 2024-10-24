@@ -1,0 +1,274 @@
+---
+title: "Assn3Analysis"
+output: html_document
+date: "2024-10-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Step 1: LOAD EXPRESSION DATA & METADATA
+setwd("C:/Users/steph/RProjects/CGS4144-Sem-Project")
+
+# Create the data folder if it doesn't exist
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+# Define file path to the plots dir and create
+plots_dir <- "plots"
+if (!dir.exists(plots_dir)) {
+  dir.create(plots_dir)
+}
+# Define = file path to the results dir and create
+results_dir <- "results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Define the file path to the data directory
+data_dir <- file.path("data", "SRP092402")
+# Declare the file path to the gene matrix file
+data_file <- file.path(data_dir, "SRP092402.tsv")
+# Declare the file path to the metadata file
+metadata_file <- file.path(data_dir, "metadata_SRP092402.tsv")
+# Check if files exist
+file.exists(data_file)
+file.exists(metadata_file)
+
+# Install libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+library(org.Hs.eg.db)
+library(readr)
+library(dplyr)
+library(biomaRt)
+library(AnnotationDbi)
+library(ggplot2)
+library(DESeq2)
+library(gprofiler2)
+library(magrittr)
+library(tidyclust)
+library(tibble)
+library(tidyverse)
+library(tidyr)
+library(ggalluvial)
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+
+
+# Read data in files
+metadata <- readr::read_tsv(metadata_file)
+gene_matrix <- readr::read_tsv(data_file)
+gene_matrix <- gene_matrix %>%
+  tibble::column_to_rownames("Gene")
+  
+# Exclude lung dx controls, mtp controls, and n/a samples
+excludedConditions <- c("lung dx controls", "mtp controls", "na")
+metadata <- metadata[!metadata$refinebio_disease %in% excludedConditions, ]
+samples <- metadata$refinebio_accession_code
+gene_matrix <- gene_matrix[, colnames(gene_matrix) %in% samples]
+
+# Check if this is in the same order
+gene_matrix <- gene_matrix %>%
+  dplyr::select(metadata$refinebio_accession_code)
+all.equal(colnames(gene_matrix), metadata$refinebio_accession_code)
+  
+# Map Ensembl identifiers to Hugo gene identifiers 
+gene_matrix <- gene_matrix %>%
+  tibble::rownames_to_column("Gene")
+mapped_list <- mapIds(
+  org.Hs.eg.db,           
+  keys = gene_matrix$Gene,
+  keytype = "ENSEMBL",      
+  column = "SYMBOL",           
+  multiVals = "first"
+)
+gene_matrix$Gene = mapped_list[gene_matrix$Gene]
+
+# Remove duplicate hugo identifiers
+gene_matrix <- as.data.frame(gene_matrix[!duplicated(gene_matrix$Gene), ])
+if (any(is.na(gene_matrix[, 1]))) {
+  gene_matrix <- as.data.frame(gene_matrix[!is.na(gene_matrix[, 1]), ])
+}
+
+
+# STEP 2: UNSUPERVISED ANALYSIS - K MEANS
+# Generate gene matrix sorted by variance
+gene_variances <- apply(gene_matrix, 1, var)
+sorted_indices <- order(gene_variances, decreasing=TRUE)
+sorted_gene_matrix <- gene_matrix[sorted_indices,]
+sorted_gene_df <- as_tibble(sorted_gene_matrix)
+
+kmeans_results <- list()
+points <- 
+  sorted_gene_df[1:10,] %>% 
+  dplyr::select(-Gene)
+  
+# K-Means - k = 3
+kclust <- kmeans(points, centers = 3)
+kmeans_results[[paste0("k", 3, "_10")]] <- kmeans(points, centers = 3)
+
+kclust$cluster
+cluster_sizes <- table(kclust$cluster)
+print(cluster_sizes)
+
+# K-Means - k = 5
+kclust <- kmeans(points, centers = 5)
+kmeans_results[[paste0("k", 5, "_10000")]] <- kmeans(points, centers = 5)
+
+kclust$cluster
+cluster_sizes <- table(kclust$cluster)
+print(cluster_sizes)
+
+# K-Means - k = 7
+kclust <- kmeans(points, centers = 7)
+kmeans_results[[paste0("k", 7, "_10000")]] <- kmeans(points, centers = 7)
+
+kclust$cluster
+cluster_sizes <- table(kclust$cluster)
+print(cluster_sizes)
+
+# K-Means - k = 9
+kclust <- kmeans(points, centers = 9)
+kmeans_results[[paste0("k", 9, "_10000")]] <- kmeans(points, centers = 9)
+
+kclust$cluster
+cluster_sizes <- table(kclust$cluster)
+print(cluster_sizes)
+
+
+# Identify genes in a cluster
+test <- sorted_gene_df[1:5000,]
+test$cluster <- factor(kclust$cluster)
+cluster_of_interest <- 4
+genes_in_cluster <-test %>%
+  filter(cluster == cluster_of_interest) %>%
+  dplyr::select(Gene)
+print(genes_in_cluster)
+
+# Perfom Chi-squared test
+test <- sorted_gene_df[1:10,]
+test$cluster <- factor(kclust$cluster)
+contingency_table <- table(test$cluster, test$Gene)
+chi_squared_test <- chisq.test(contingency_table)
+print(chi_squared_test)
+
+
+# Create Sankey Plot
+cluster_assignments <- data.frame(
+  Sample = colnames(gene_matrix),
+  k3 = kmeans_results$k3_10$cluster,
+  k5 = kmeans_results$k5_10$cluster,
+  k7 = kmeans_results$k7_10$cluster,
+  k9 = kmeans_results$k9_10$cluster
+)
+
+long_data <- pivot_longer(cluster_assignments, cols = starts_with("k"),names_to = "k_value", values_to = "cluster")
+long_data$cluster <- as.factor(long_data$cluster)
+
+sankey <- ggplot(
+    long_data,
+    aes(x = k_value, stratum = cluster, alluvium = Sample,          fill = cluster, label = cluster)) +
+  scale_fill_brewer(type = "qual", palette = "Pastel1") +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback") +
+  geom_stratum() +
+  theme(legend.position = "bottom") +
+  ggtitle("Cluster Assignments Across Different k")
+  
+ggsave("SankeyPlot.png", plot = sankey, width = 10, height = 8, dpi = 600)
+
+
+# STEP 3: HEATMAP & DENDROGRAMS
+only_expression <- gene_matrix[1:5000,2:820]
+only_expression <- t(scale(t(only_expression)))
+test <- data.frame(Gene = gene_matrix[1:5000,]$Gene, only_expression)
+test <- na.omit(test)
+test[is.na(test)] <- 0
+
+
+genes_of_interest <- c("ACTB", "CD74", "FTL", "LYZ", "FKBP8", "CSF3R")
+gene_highlight <- ifelse(test$Gene %in% genes_of_interest, 1, 0)
+annotated_genes <- which(gene_highlight == 1)
+
+
+# Sample group information (replace with actual data)
+sample_groups <- factor(metadata$refinebio_disease[match(colnames(test[,2:820]), metadata$refinebio_accession_code)])
+
+# Create a HeatmapAnnotation object for the sidebar, including selected genes and sample groups
+
+# Correcting the gene_annotation section to use anno_mark for specific genes
+gene_annotation <- rowAnnotation(
+  Genes = anno_mark(at = annotated_genes, 
+                    labels = test$Gene[annotated_genes],
+                    labels_gp = gpar(col = "red", fontsize = 4),
+                    which = "row")  
+)
+
+group_annotation <- HeatmapAnnotation(
+  Group = sample_groups,
+  col = list(Group = c("tb subjects" = "red", "healthy controls" = "blue"))
+)
+
+min <- min(test[,2:820],  na.rm = TRUE)
+max <- max(test[,2:820],  na.rm = TRUE)
+
+# Use a color scale according to the scaled range
+col_fun <- colorRamp2(c(min, 0, max), c("blue", "white", "red"))
+
+
+png("Heatmap.png", width = 4000, height = 4000, res = 600)
+
+# Create the heatmap
+heatmap <- Heatmap(test[,2:820], 
+        name = "Expression", 
+        col = col_fun,
+        show_row_names = FALSE, 
+        show_column_names = FALSE, 
+        top_annotation = group_annotation,
+        right_annotation = gene_annotation, 
+        cluster_columns = TRUE, 
+        cluster_rows = TRUE,
+        row_title = "Genes",                       
+        column_title = "Samples",                  
+        heatmap_legend_param = list(
+            title = "Expression Level", 
+            at = c(min, 0, max),  # Adjust legend to match data range
+            labels = c("Low", "Medium", "High")
+        ),
+        show_row_dend = TRUE,                     
+        show_column_dend = TRUE  )
+        
+draw(heatmap)
+dev.off()
+
+
+# STEP 4: STATISTICS 
+cluster <- kmeans_results$k9_10000$cluster
+
+# Seperate samples into healthy vs tb
+tb_samples <- metadata$refinebio_accession_code[metadata$refinebio_disease == "tb subjects"]
+normal_samples <- metadata$refinebio_accession_code[metadata$refinebio_disease == "healthy controls"]
+
+# Calculate average gene expression levels in samples
+avg_expression_tb <- rowMeans(gene_matrix[1:10000, tb_samples])
+avg_expression_normal <- rowMeans(gene_matrix[1:10000, normal_samples])
+
+# Determine group each gene is more expressed in
+group_assignment <- ifelse(avg_expression_tb > avg_expression_normal, "TB", "Normal")
+
+gene_cluster_group <- data.frame(
+  Cluster = factor(cluster),  
+  Group = group_assignment
+)
+
+contingency_table <- table(gene_cluster_group$Cluster, gene_cluster_group$Group)
+print(contingency_table)
+chi_squared_test <- chisq.test(contingency_table)
+print(chi_squared_test)
+
+# Multiple hypothesis testing - p.adjust
+p_values <- c()
+adjusted_p_values <- p.adjust(p_values, method = "fdr") 
+print(adjusted_p_values)

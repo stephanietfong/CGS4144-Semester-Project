@@ -8,6 +8,7 @@ date: "2024-09-24"
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+setwd("C:/Users/steph/RProjects/CGS4144-Sem-Project")
 # Create the data folder if it doesn't exist
 if (!dir.exists("data")) {
   dir.create("data")
@@ -36,7 +37,7 @@ file.exists(metadata_file)
 # Install libraries
 if (!requireNamespace("BiocManager", quietly = TRUE))
     install.packages("BiocManager")
-BiocManager::install("org.Hs.eg.db")
+install.packages("org.Hs.eg.db")
 library(org.Hs.eg.db)
 install.packages("readr")
 library(readr)
@@ -63,7 +64,6 @@ library(pheatmap)
 install.packages("gprofiler2")
 library(gprofiler2)
 library(magrittr)
-
 
 # Read data in files
 metadata <- readr::read_tsv(metadata_file)
@@ -273,6 +273,8 @@ go_results <- gost(
   domain_scope = "annotated",
   evcodes = TRUE
 )
+
+print(go_results$result)
 
 # Sort the results by p-value
 sorted_by_enrichment <- as.data.frame(go_results$result) %>%
