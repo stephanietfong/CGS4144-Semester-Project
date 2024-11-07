@@ -1,0 +1,382 @@
+---
+title: "Assn4Analysis"
+output: html_document
+date: "2024-11-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Step 1: LOAD EXPRESSION DATA & METADATA
+setwd("C:/Users/steph/RProjects/CGS4144-Sem-Project")
+
+# Create the data folder if it doesn't exist
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+# Define file path to the plots dir and create
+plots_dir <- "plots"
+if (!dir.exists(plots_dir)) {
+  dir.create(plots_dir)
+}
+# Define = file path to the results dir and create
+results_dir <- "results"
+if (!dir.exists(results_dir)) {
+  dir.create(results_dir)
+}
+
+# Define the file path to the data directory
+data_dir <- file.path("data", "SRP092402")
+# Declare the file path to the gene matrix file
+data_file <- file.path(data_dir, "SRP092402.tsv")
+# Declare the file path to the metadata file
+metadata_file <- file.path(data_dir, "metadata_SRP092402.tsv")
+# Check if files exist
+file.exists(data_file)
+file.exists(metadata_file)
+
+# Install libraries
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+library(org.Hs.eg.db)
+library(readr)
+library(dplyr)
+library(biomaRt)
+library(AnnotationDbi)
+library(ggplot2)
+library(DESeq2)
+library(gprofiler2)
+library(magrittr)
+library(tidyclust)
+library(tibble)
+library(tidyverse)
+library(tidyr)
+library(ggalluvial)
+library(ComplexHeatmap)
+library(circlize)
+library(pheatmap)
+library(class)
+library(caret)
+library(pROC)
+library(readxl)
+
+# Read data in files
+metadata <- readr::read_tsv(metadata_file)
+gene_matrix <- readr::read_tsv(data_file)
+gene_matrix <- gene_matrix %>%
+  tibble::column_to_rownames("Gene")
+  
+# Exclude lung dx controls, mtp controls, and n/a samples
+excludedConditions <- c("lung dx controls", "mtp controls", "na")
+metadata <- metadata[!metadata$refinebio_disease %in% excludedConditions, ]
+samples <- metadata$refinebio_accession_code
+gene_matrix <- gene_matrix[, colnames(gene_matrix) %in% samples]
+
+# Check if this is in the same order
+gene_matrix <- gene_matrix %>%
+  dplyr::select(metadata$refinebio_accession_code)
+all.equal(colnames(gene_matrix), metadata$refinebio_accession_code)
+  
+# Map Ensembl identifiers to Hugo gene identifiers 
+gene_matrix <- gene_matrix %>%
+  tibble::rownames_to_column("Gene")
+mapped_list <- mapIds(
+  org.Hs.eg.db,           
+  keys = gene_matrix$Gene,
+  keytype = "ENSEMBL",      
+  column = "SYMBOL",           
+  multiVals = "first"
+)
+gene_matrix$Gene = mapped_list[gene_matrix$Gene]
+
+# Remove duplicate hugo identifiers
+gene_matrix <- as.data.frame(gene_matrix[!duplicated(gene_matrix$Gene), ])
+if (any(is.na(gene_matrix[, 1]))) {
+  gene_matrix <- as.data.frame(gene_matrix[!is.na(gene_matrix[, 1]), ])
+}
+
+
+# STEP 2: SUPERVISED ANALYSIS - K NEAREST NEIGHBORS
+# Create subset of matrix with top 5000 genes
+gene_matrix_5000 = gene_matrix[1:5000,]
+rownames(gene_matrix_5000) <- NULL
+gene_matrix_5000 <- gene_matrix_5000 %>%
+  tibble::column_to_rownames(var = "Gene")
+gene_matrix_5000 <- scale(gene_matrix_5000)
+metadata <- metadata[match(colnames(gene_matrix_5000), metadata$refinebio_accession_code),]
+transposed_matrix <- t(gene_matrix_5000)
+
+set.seed(123) 
+labels <- ifelse(metadata$refinebio_disease == "tb subjects", 1, 0)
+trainIndex <- createDataPartition(labels, p = 0.7, list = FALSE, times = 1)
+
+# TB VS. HEALTHY CONTROLS
+# Perform KNN
+train_data <- transposed_matrix[trainIndex, ]
+test_data <- transposed_matrix[-trainIndex, ]
+train_labels <- labels[trainIndex]
+test_labels <- labels[-trainIndex]
+
+predicted_labels <- knn(train = train_data, test = test_data, cl = train_labels, k = 7)
+confusion_matrix <- table(predicted_labels, test_labels)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Confusion Matrix:\n")
+print(confusion_matrix)
+cat("Accuracy:", accuracy, "\n")
+
+predictions_df <- data.frame(
+  Sample = rownames(test_data),
+  KNN = predicted_labels
+)
+write.csv(predictions_df, "tb_vs_healthy_predictions.csv", row.names = FALSE)
+
+# CLUSTERS
+# Run k-means to identify clusters
+kmeans_results <- list()
+kclust <- kmeans(t(gene_matrix_5000), centers = 3)
+gene_clusters <- kclust$cluster
+print(table(gene_clusters))
+
+# Perform KNN
+train_data <- transposed_matrix[trainIndex, ]
+test_data <- transposed_matrix[-trainIndex, ]
+train_labels <- gene_clusters[trainIndex]
+test_clusters <- gene_clusters[-trainIndex]
+
+predicted_clusters <- knn(train = train_data, test = test_data, cl = train_labels, k = 7)
+confusion_matrix <- table(predicted_clusters, test_clusters)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Confusion Matrix:\n")
+print(confusion_matrix)
+cat("Accuracy:", accuracy, "\n")
+
+predictions_df <- data.frame(
+  Sample = rownames(test_data),
+  KNN = predicted_clusters
+)
+write.csv(predictions_df, "clusters_knn_predictions.csv", row.names = FALSE)
+
+
+# STEP 3: AREA UNDER THE ROC CURVE
+# TB VS. HEALTHY CONTROLS
+tb_healthy_data <- read_excel("tb_vs_healthy_predictions.xlsx")
+
+# Create ROC curve and calculate AUC
+plot_roc_for_model <- function(actual, predictions, model_name, file_name) {
+  png(filename = file_name, width = 800, height = 600)
+
+  roc_obj <- roc(actual, predictions)
+  auc_value <- auc(roc_obj)
+  plot(roc_obj, main = paste("ROC Curve -", model_name), col = "blue", lwd = 2)
+  legend("bottomright", legend = paste("AUC =", round(auc_value, 3)), col = "blue", lwd = 2)
+  
+  dev.off()
+  return(auc_value)
+}
+
+# Get ROC curve for KNN model
+knn_auc <- plot_roc_for_model(test_labels, tb_healthy_data$KNN, "KNN Model", "KNN_ROC.png")
+
+# Get ROC curve for LR model
+lr_auc <- plot_roc_for_model(test_labels, tb_healthy_data$LR, "Logistic Regression Model", "LR_ROC.png")
+
+# Calculate for each sample, calculate how many predicted each group
+sample_column <- "Sample"
+model_columns <- names(tb_healthy_data)[names(tb_healthy_data) != sample_column]
+
+tb_healthy_count_result <- tb_healthy_data %>%
+  rowwise() %>%
+  mutate(
+    TB_Count = sum(c_across(all_of(model_columns)) == 1),
+    Normal_Count = sum(c_across(all_of(model_columns)) == 0)
+  ) %>%
+  dplyr::select(Sample, TB_Count, Normal_Count) 
+
+write.csv(tb_healthy_count_result, "tb_healthy_predictions_count.csv", row.names = FALSE)
+
+# CLUSTERS
+cluster_data <- read_excel("clusters_predictions.xlsx")
+
+models <- list(
+  KNN = cluster_data$KNN,
+  LR = cluster_data$LR
+)
+auc_results <- list()
+
+for (model_name in names(models)) {
+  predicted_clusters <- models[[model_name]]
+  
+  # Calculate ROC and AUC for each cluster (One-vs-Rest)
+  auc_per_class <- sapply(unique(test_clusters), function(cluster_label) {
+    binary_true_labels <- ifelse(test_clusters == cluster_label, 1, 0)
+    binary_predicted_probs <- ifelse(predicted_clusters == cluster_label, 1, 0)
+    
+    roc_curve <- roc(binary_true_labels, binary_predicted_probs)
+    auc_value <- auc(roc_curve)
+
+    plot(roc_curve, main = paste("ROC Curve -", model_name, "- Cluster", cluster_label),
+         col = "blue", lwd = 2, legacy.axes = TRUE)
+    abline(a = 0, b = 1, lty = 2, col = "gray")
+    
+    png_filename <- paste0(model_name, "_Cluster_", cluster_label, "_ROC.png")
+    png(png_filename)
+    plot(roc_curve, main = paste("ROC Curve -", model_name, "- Cluster", cluster_label),
+         col = "blue", lwd = 2, legacy.axes = TRUE)
+     legend("bottomright", legend = paste("AUC =", round(auc_value, 3)), col = "blue", lwd = 2)
+    abline(a = 0, b = 1, lty = 2, col = "gray")
+    dev.off() # Save the plot
+
+    return(auc_value)
+  })
+  
+  # Store AUC results for the current model
+  auc_results[[model_name]] <- auc_per_class
+}
+print(auc_results)
+
+# Calculate for each sample, calculate how many predicted each group - Clusters
+sample_column <- "Sample"
+model_columns <- names(cluster_data)[names(cluster_data) != sample_column]
+
+cluster_count_result <- cluster_data %>%
+  rowwise() %>%
+  mutate(
+    Cluster_1_Count = sum(c_across(all_of(model_columns)) == 1),
+    Cluster_2_Count = sum(c_across(all_of(model_columns)) == 2),
+    Cluster_3_Count = sum(c_across(all_of(model_columns)) == 3)
+  ) %>%
+  dplyr::select(Sample, Cluster_1_Count, Cluster_2_Count, Cluster_3_Count) 
+
+write.csv(cluster_count_result, "clusters_predictions_count.csv", row.names = FALSE)
+
+# Calculate cluster and class label correlation
+combined_data <- read_excel("combined_data.xlsx")
+
+# Calcuate stability
+combined_data <- combined_data %>%
+  mutate(
+    knn_cluster_stability = ifelse(KNN_Cluster == test_clusters, 1, 0), 
+    lr_cluster_stability = ifelse(LR_Cluster == test_clusters, 1, 0),   
+    knn_class_stability = ifelse(KNN_Group == test_labels, 1, 0),  # KNN class stability
+    lr_class_stability = ifelse(LR_Group == test_labels, 1, 0)
+  )
+
+p_values_knn_cluster <- t.test(combined_data$knn_cluster_stability)$p.value
+p_values_lr_cluster <- t.test(combined_data$lr_cluster_stability)$p.value
+
+p_values_knn_class <- t.test(combined_data$knn_class_stability)$p.value
+p_values_lr_class <- t.test(combined_data$lr_class_stability)$p.value
+
+# Get p-values
+p_adj_knn_cluster <- p.adjust(p_values_knn_cluster, method = "BH")
+p_adj_lr_cluster <- p.adjust(p_values_lr_cluster, method = "BH")
+p_adj_knn_class <- p.adjust(p_values_knn_class, method = "BH")
+p_adj_lr_class <- p.adjust(p_values_lr_class, method = "BH")
+
+# Calculate correlation values for each model
+cor_test_knn <- cor.test(combined_data$knn_cluster_stability, combined_data$knn_class_stability)
+cor_test_lr <- cor.test(combined_data$lr_cluster_stability, combined_data$lr_class_stability)
+print(cor_test_knn)
+print(cor_test_lr)
+
+
+# STEP 4: RETRAIN MODEL WITH 10, 100, 1000, 10000 GENES
+# Create subset of matrix 
+gene_matrix_subset = gene_matrix[1:10000,]
+rownames(gene_matrix_subset) <- NULL
+gene_matrix_subset <- gene_matrix_subset %>%
+  tibble::column_to_rownames(var = "Gene")
+gene_matrix_subset <- scale(gene_matrix_subset)
+metadata <- metadata[match(colnames(gene_matrix_subset), metadata$refinebio_accession_code),]
+transposed_matrix <- t(gene_matrix_subset)
+
+# TB VS. HEALTHY CONTROLS
+# Perform KNN
+train_data <- transposed_matrix[trainIndex, ]
+test_data <- transposed_matrix[-trainIndex, ]
+train_labels <- labels[trainIndex]
+test_labels <- labels[-trainIndex]
+
+predicted_labels <- knn(train = train_data, test = test_data, cl = train_labels, k = 7)
+confusion_matrix <- table(predicted_labels, test_labels)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Confusion Matrix:\n")
+print(confusion_matrix)
+cat("Accuracy:", accuracy, "\n")
+
+predicted_numeric <- as.numeric(predicted_labels) - 1
+prob_pos_class <- ifelse(predicted_numeric == 1, 1, 0)
+roc_curve <- roc(test_labels, prob_pos_class)
+auc_value <- auc(roc_curve)
+print(auc_value)
+
+# CLUSTERS
+# Run k-means to identify clusters
+kmeans_results <- list()
+kclust <- kmeans(t(gene_matrix_subset), centers = 3)
+gene_clusters <- kclust$cluster
+print(table(gene_clusters))
+
+# Perform k-NN
+train_data <- transposed_matrix[trainIndex, ]
+test_data <- transposed_matrix[-trainIndex, ]
+train_labels <- gene_clusters[trainIndex]
+test_clusters <- gene_clusters[-trainIndex]
+
+predicted_clusters <- knn(train = train_data, test = test_data, cl = train_labels, k = 7)
+confusion_matrix <- table(predicted_clusters, test_clusters)
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+cat("Confusion Matrix:\n")
+print(confusion_matrix)
+cat("Accuracy:", accuracy, "\n")
+
+predicted_numeric <- as.numeric(predicted_clusters)  
+prob_pos_class_1 <- ifelse(predicted_numeric == 1, 1, 0)
+roc_curve_1 <- roc(test_clusters, prob_pos_class_1)
+auc_value_1 <- auc(roc_curve_1)
+print(auc_value_1)
+prob_pos_class_2 <- ifelse(predicted_numeric == 2, 1, 0)
+roc_curve_2 <- roc(test_clusters, prob_pos_class_2)
+auc_value_2 <- auc(roc_curve_2)
+print(auc_value_2)
+prob_pos_class_3 <- ifelse(predicted_numeric == 3, 1, 0)
+roc_curve_3 <- roc(test_clusters, prob_pos_class_3)
+auc_value_3 <- auc(roc_curve_3)
+print(auc_value_3)
+
+# STEP 5: HEATMAP
+test_samples <- rownames(test_data)  
+gene_matrix_test <- gene_matrix_5000[, test_samples, drop = FALSE]
+
+correlations <- apply(gene_matrix_test, 1, function(gene_expression) {
+  cor(gene_expression, as.numeric(predicted_labels), use = "complete.obs")
+})
+
+top_n <- 50  
+top_genes <- names(sort(abs(correlations), decreasing = TRUE)[1:top_n])
+
+heatmap_data <- gene_matrix_5000[top_genes, rownames(test_data)]
+class_labels_factor <- factor(predictions_df$KNN, levels = c(0, 1), labels = c("Healthy", "TB"))
+
+sample_annotation <- HeatmapAnnotation(
+  Class = class_labels_factor,
+  col = list(Class = c("Healthy" = "lightblue", "TB" = "salmon"))
+)
+
+png("Heatmap.png", width = 4000, height = 4000, res = 600)
+heatmap <- Heatmap(heatmap_data,
+                   name = "Gene Expression", 
+                   top_annotation = sample_annotation, 
+                   cluster_rows = TRUE, 
+                   cluster_columns = TRUE, 
+                   show_row_names = FALSE, 
+                   show_column_names = FALSE, 
+                   row_title = "Genes", 
+                   column_title = "Samples",
+                   col = colorRamp2(c(min(heatmap_data), mean(heatmap_data), max(heatmap_data)), c("blue", "white", "red")),
+                   heatmap_legend_param = list(title = "Expression Level"), # Legend for color scale
+                   show_heatmap_legend = TRUE #
+)
+draw(heatmap)
+dev.off()
